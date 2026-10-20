@@ -1,7 +1,8 @@
 # link-amazon-seller
 
 Servidor **MCP** que dá ao Claude acesso aos **relatórios da sua conta Amazon Seller** pela
-[Selling Partner API (SP-API)](https://developer-docs.amazon.com/sp-api/), usando a Reports API.
+[Selling Partner API (SP-API)](https://developer-docs.amazon.com/sp-api/), usando a Reports API, e aos
+**preços de qualquer produto** do marketplace pela Product Pricing API.
 
 Com ele você pode pedir ao Claude coisas como:
 
@@ -9,6 +10,7 @@ Com ele você pode pedir ao Claude coisas como:
 - "Baixe o último relatório de liquidação e some as taxas por tipo."
 - "Quais produtos FBA estão com estoque encalhado ou vão acabar nas próximas semanas?"
 - "Quanto a Amazon me reembolsou por itens perdidos este ano?"
+- "Qual o preço da Buy Box dos 3 produtos mais clicados em 'planner semanal'? E o meu?"
 
 ## O que ele faz
 
@@ -24,10 +26,16 @@ Com ele você pode pedir ao Claude coisas como:
 | `agregar_relatorio` | Soma colunas agrupando por outras (ex.: vendas por SKU) |
 | `ler_relatorio_bruto` | Conteúdo bruto (XML/texto) em trechos |
 | `configuracao_atual` | Região, marketplaces e pasta configurados |
+| `precos_asins` | Preço da Buy Box, nº de ofertas e ranking de vendas de até 200 ASINs, inclusive de concorrentes |
+| `ofertas_asin` | Todas as ofertas de um ASIN: preço, frete, FBA/Prime, quem ganha a Buy Box |
+| `meus_precos` | Preço atual das suas ofertas, por SKU |
 
 Qualquer `reportType` válido da SP-API é aceito, mesmo que não esteja no catálogo.
 Os relatórios são salvos em `./relatorios` (TSV, CSV, JSON ou XML), e o Claude os lê aos poucos,
 sem precisar carregar arquivos enormes de uma vez.
+
+As ferramentas de preço exigem o papel **Pricing** no app e mostram o preço do momento da consulta
+(a API não tem histórico).
 
 O servidor é **somente leitura**: não altera preços, anúncios nem pedidos.
 

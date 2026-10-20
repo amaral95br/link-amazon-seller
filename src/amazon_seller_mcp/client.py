@@ -1,4 +1,4 @@
-"""Cliente HTTP da SP-API: autenticação LWA, tokens restritos (RDT) e Reports API 2021-06-30."""
+"""Cliente HTTP da SP-API: autenticação LWA, tokens restritos (RDT), Reports API 2021-06-30 e Product Pricing v0."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from .config import Config
 
 LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 REPORTS = "/reports/2021-06-30"
+PRICING = "/products/pricing/v0"
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
@@ -137,6 +138,26 @@ class SPAPIClient:
         if document.get("compressionAlgorithm") == "GZIP" or content[:2] == b"\x1f\x8b":
             content = gzip.decompress(content)
         return content, resp.charset_encoding
+
+    # --- Product Pricing API v0 ------------------------------------------------------
+
+    async def get_competitive_pricing(self, marketplace_id: str, asins: list[str]) -> list[dict[str, Any]]:
+        """Buy Box, nº de ofertas e ranking de vendas de até 20 ASINs (de qualquer vendedor)."""
+        data = await self.request("GET", f"{PRICING}/competitivePrice",
+                                  params={"MarketplaceId": marketplace_id, "ItemType": "Asin", "Asins": asins})
+        return data.get("payload") or []
+
+    async def get_item_offers(self, marketplace_id: str, asin: str, condition: str = "New") -> dict[str, Any]:
+        """Todas as ofertas de um ASIN (até 20), com resumo de Buy Box e menores preços."""
+        data = await self.request("GET", f"{PRICING}/items/{asin}/offers",
+                                  params={"MarketplaceId": marketplace_id, "ItemCondition": condition})
+        return data.get("payload") or {}
+
+    async def get_own_pricing(self, marketplace_id: str, skus: list[str]) -> list[dict[str, Any]]:
+        """Preço atual das suas próprias ofertas, por SKU (até 20)."""
+        data = await self.request("GET", f"{PRICING}/price",
+                                  params={"MarketplaceId": marketplace_id, "ItemType": "Sku", "Skus": skus})
+        return data.get("payload") or []
 
     async def wait_for_report(self, report_id: str, timeout: float, interval: float = 15.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout

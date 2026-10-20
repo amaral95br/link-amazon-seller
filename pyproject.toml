@@ -1,7 +1,7 @@
 [project]
 name = "amazon-seller-mcp"
-version = "0.1.0"
-description = "Servidor MCP que dá ao Claude acesso aos relatórios da conta Amazon Seller (SP-API Reports)"
+version = "0.2.0"
+description = "Servidor MCP que dá ao Claude acesso aos relatórios e preços da conta Amazon Seller (SP-API)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

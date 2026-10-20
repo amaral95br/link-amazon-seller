@@ -7,9 +7,9 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from . import files
+from . import files, pricing
 from .catalog import BY_CODE, CATEGORIES, REPORT_TYPES
-from .client import SPAPIClient
+from .client import SPAPIClient, SPAPIError
 from .config import MARKETPLACES, Config, load_config
 
 INSTRUCTIONS = """\
@@ -26,6 +26,13 @@ Fluxo típico:
 
 Datas em ISO 8601 (ex.: 2026-09-01T00:00:00Z). A Amazon limita a frequência de solicitações
 (cerca de 1 relatório por minuto, com rajadas de até 15).
+
+Preços (Product Pricing API, exige o papel Pricing no app):
+- precos_asins: Buy Box, nº de ofertas e ranking de vendas de qualquer ASIN, inclusive de concorrentes
+  (ex.: os 3 mais clicados de cada termo do Brand Analytics). Até 200 ASINs por chamada.
+- ofertas_asin: todas as ofertas de um ASIN (preço, frete, FBA/Prime, quem tem a Buy Box).
+- meus_precos: preço atual das suas próprias ofertas, por SKU.
+Os preços são do momento da consulta (não há histórico).
 """
 
 mcp = MCPServer("amazon-seller", instructions=INSTRUCTIONS)
@@ -229,6 +236,106 @@ async def cancelar_relatorio(report_id: str) -> dict[str, Any]:
 async def listar_agendamentos(tipos: list[str]) -> dict[str, Any]:
     """Lista os agendamentos de relatórios recorrentes configurados para os tipos informados."""
     return await client().get_report_schedules([t.strip().upper() for t in tipos])
+
+
+# --- Product Pricing API ----------------------------------------------------------------------
+
+LOTE_PRECOS = 20
+MAX_ASINS = 200
+
+
+def _codes(values: list[str], nome: str, maximo: int) -> list[str]:
+    codes = list(dict.fromkeys(v.strip().upper() for v in values or [] if v and v.strip()))
+    if not codes:
+        raise ValueError(f"Informe ao menos um {nome}.")
+    if len(codes) > maximo:
+        raise ValueError(f"Máximo de {maximo} {nome}s por chamada (recebidos {len(codes)}).")
+    return codes
+
+
+def _pricing_error(e: SPAPIError) -> dict[str, Any]:
+    erro: dict[str, Any] = {"erro": f"A Amazon respondeu {e.status}", "detalhes": e.body}
+    if e.status in (401, 403):
+        erro["dica"] = ("Acesso negado. Confira se o papel 'Pricing' está marcado no aplicativo da Central de "
+                        "desenvolvedores e se o Refresh Token no .env foi gerado depois disso (e não é de sandbox).")
+    return erro
+
+
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+@mcp.tool()
+async def precos_asins(asins: list[str], marketplace: str | None = None) -> dict[str, Any]:
+    """Preço da Buy Box, nº de ofertas e ranking de vendas de ASINs (seus ou de concorrentes).
+
+    Bom para montar uma base de preços por palavra-chave: passe os ASINs mais clicados de cada termo
+    do relatório de Principais termos de pesquisa.
+
+    Args:
+        asins: lista de ASINs (até 200; consultados em lotes de 20).
+        marketplace: ID do marketplace; se omitido, usa o primeiro configurado (Brasil).
+    """
+    codes = _codes(asins, "ASIN", MAX_ASINS)
+    mkt = marketplace or config().marketplace_ids[0]
+    itens: list[dict[str, Any]] = []
+    try:
+        for lote in _chunks(codes, LOTE_PRECOS):
+            itens.extend(pricing.competitive_item(i) for i in await client().get_competitive_pricing(mkt, lote))
+    except SPAPIError as e:
+        return {**_pricing_error(e), "marketplace": mkt, "itens_ja_consultados": itens}
+    encontrados = {i.get("asin") for i in itens}
+    faltando = [a for a in codes if a not in encontrados]
+    return {
+        "marketplace": mkt,
+        "total": len(itens),
+        "itens": itens,
+        **({"sem_resposta": faltando} if faltando else {}),
+        "observacao": "Preços do momento da consulta. ranking_vendas: menor número = mais vendido na categoria.",
+    }
+
+
+@mcp.tool()
+async def ofertas_asin(asin: str, marketplace: str | None = None, condicao: str = "New",
+                       limite: int = 10) -> dict[str, Any]:
+    """Todas as ofertas de um ASIN: preço, frete, FBA/Prime, quem ganha a Buy Box e menores preços por canal.
+
+    Args:
+        asin: o ASIN.
+        marketplace: ID do marketplace; se omitido, usa o primeiro configurado (Brasil).
+        condicao: New, Used, Collectible, Refurbished ou Club.
+        limite: quantas ofertas devolver, das mais baratas para as mais caras.
+    """
+    code = _codes([asin], "ASIN", 1)[0]
+    mkt = marketplace or config().marketplace_ids[0]
+    try:
+        payload = await client().get_item_offers(mkt, code, condicao)
+    except SPAPIError as e:
+        return {**_pricing_error(e), "asin": code, "marketplace": mkt}
+    return {"marketplace": mkt, **pricing.item_offers(payload, limite)}
+
+
+@mcp.tool()
+async def meus_precos(skus: list[str], marketplace: str | None = None) -> dict[str, Any]:
+    """Preço atual das suas próprias ofertas, por SKU (até 200; em lotes de 20).
+
+    Args:
+        skus: lista de SKUs seus.
+        marketplace: ID do marketplace; se omitido, usa o primeiro configurado (Brasil).
+    """
+    codes = list(dict.fromkeys(s.strip() for s in skus or [] if s and s.strip()))
+    if not codes:
+        raise ValueError("Informe ao menos um SKU.")
+    if len(codes) > MAX_ASINS:
+        raise ValueError(f"Máximo de {MAX_ASINS} SKUs por chamada (recebidos {len(codes)}).")
+    mkt = marketplace or config().marketplace_ids[0]
+    itens: list[dict[str, Any]] = []
+    try:
+        for lote in _chunks(codes, LOTE_PRECOS):
+            itens.extend(pricing.own_price_item(i) for i in await client().get_own_pricing(mkt, lote))
+    except SPAPIError as e:
+        return {**_pricing_error(e), "marketplace": mkt, "itens_ja_consultados": itens}
+    return {"marketplace": mkt, "total": len(itens), "itens": itens}
 
 
 # --- arquivos locais -------------------------------------------------------------------------
