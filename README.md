@@ -29,6 +29,7 @@ Com ele você pode pedir ao Claude coisas como:
 | `precos_asins` | Preço da Buy Box, nº de ofertas e ranking de vendas de até 200 ASINs, inclusive de concorrentes |
 | `ofertas_asin` | Todas as ofertas de um ASIN: preço, frete, FBA/Prime, quem ganha a Buy Box |
 | `meus_precos` | Preço atual das suas ofertas, por SKU |
+| `alterar_precos` | Altera o preço de anúncios seus: mostra uma prévia, só aplica com confirmação, bloqueia variações acima de 25% e registra tudo em `alteracoes_preco.csv` |
 
 Qualquer `reportType` válido da SP-API é aceito, mesmo que não esteja no catálogo.
 Os relatórios são salvos em `./relatorios` (TSV, CSV, JSON ou XML), e o Claude os lê aos poucos,
@@ -37,7 +38,9 @@ sem precisar carregar arquivos enormes de uma vez.
 As ferramentas de preço exigem o papel **Pricing** no app e mostram o preço do momento da consulta
 (a API não tem histórico).
 
-O servidor é **somente leitura**: não altera preços, anúncios nem pedidos.
+A única escrita é `alterar_precos`, que exige o papel **Product Listing** e a variável `SPAPI_SELLER_ID`
+(o Token de comerciante da conta). Ela mantém preço promocional e preço mínimo/máximo já cadastrados.
+O servidor não altera anúncios, estoque nem pedidos.
 
 ## 1. Obter as credenciais da SP-API
 

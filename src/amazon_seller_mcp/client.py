@@ -6,6 +6,7 @@ import asyncio
 import gzip
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -14,6 +15,7 @@ from .config import Config
 LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 REPORTS = "/reports/2021-06-30"
 PRICING = "/products/pricing/v0"
+LISTINGS = "/listings/2021-08-01"
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
@@ -158,6 +160,19 @@ class SPAPIClient:
         data = await self.request("GET", f"{PRICING}/price",
                                   params={"MarketplaceId": marketplace_id, "ItemType": "Sku", "Skus": skus})
         return data.get("payload") or []
+
+    # --- Listings Items API 2021-08-01 -------------------------------------------------
+
+    async def get_listing(self, seller_id: str, sku: str, marketplace_id: str) -> dict[str, Any]:
+        return await self.request("GET", f"{LISTINGS}/items/{quote(seller_id, safe='')}/{quote(sku, safe='')}",
+                                  params={"marketplaceIds": marketplace_id,
+                                          "includedData": ["summaries", "attributes", "issues"]})
+
+    async def patch_listing(self, seller_id: str, sku: str, marketplace_id: str, product_type: str,
+                            patches: list[dict[str, Any]]) -> dict[str, Any]:
+        return await self.request("PATCH", f"{LISTINGS}/items/{quote(seller_id, safe='')}/{quote(sku, safe='')}",
+                                  params={"marketplaceIds": marketplace_id},
+                                  json={"productType": product_type, "patches": patches})
 
     async def wait_for_report(self, report_id: str, timeout: float, interval: float = 15.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout

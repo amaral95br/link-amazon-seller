@@ -7,7 +7,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from . import files, pricing
+from . import files, listings, pricing
 from .catalog import BY_CODE, CATEGORIES, REPORT_TYPES
 from .client import SPAPIClient, SPAPIError
 from .config import MARKETPLACES, Config, load_config
@@ -33,6 +33,12 @@ Preços (Product Pricing API, exige o papel Pricing no app):
 - ofertas_asin: todas as ofertas de um ASIN (preço, frete, FBA/Prime, quem tem a Buy Box).
 - meus_precos: preço atual das suas próprias ofertas, por SKU.
 Os preços são do momento da consulta (não há histórico).
+
+Alterar preços (Listings Items API, exige o papel Product Listing e SPAPI_SELLER_ID no .env):
+- alterar_precos SEMPRE primeiro com confirmar=false para mostrar a prévia ao usuário; só repita com
+  confirmar=true depois que ele aprovar explicitamente aquela prévia.
+- Variações acima de 25% são bloqueadas, a menos que o usuário peça permitir_variacao_grande=true.
+- Toda alteração enviada fica registrada em alteracoes_preco.csv na pasta de relatórios.
 """
 
 mcp = MCPServer("amazon-seller", instructions=INSTRUCTIONS)
@@ -336,6 +342,133 @@ async def meus_precos(skus: list[str], marketplace: str | None = None) -> dict[s
     except SPAPIError as e:
         return {**_pricing_error(e), "marketplace": mkt, "itens_ja_consultados": itens}
     return {"marketplace": mkt, "total": len(itens), "itens": itens}
+
+
+# --- alteração de preço (Listings Items API) ----------------------------------------------------
+
+MAX_ALTERACOES = 20
+VARIACAO_MAXIMA = 0.25
+
+
+async def _prepare_change(seller_id: str, mkt: str, sku: str, novo: float) -> dict[str, Any]:
+    item = await client().get_listing(seller_id, sku, mkt)
+    resumo = listings.summary(item, mkt)
+    attributes = item.get("attributes") or {}
+    atual, moeda = listings.current_price(attributes, mkt)
+    info: dict[str, Any] = {
+        "sku": sku,
+        "asin": resumo.get("asin"),
+        "titulo": (resumo.get("itemName") or "")[:90],
+        "preco_atual": atual,
+        "preco_novo": round(novo, 2),
+        "variacao_pct": round((novo / atual - 1) * 100, 1) if atual else None,
+        "_product_type": resumo.get("productType") or item.get("productType"),
+        "_attributes": attributes,
+        "_moeda": moeda or "BRL",
+    }
+    return info
+
+
+@mcp.tool()
+async def alterar_precos(
+    alteracoes: list[dict[str, Any]],
+    confirmar: bool = False,
+    permitir_variacao_grande: bool = False,
+    marketplace: str | None = None,
+) -> dict[str, Any]:
+    """Altera o preço de venda de anúncios seus, por SKU. Primeiro mostra uma prévia; só aplica com confirmar=true.
+
+    Sempre chame com confirmar=false, mostre a prévia ao usuário e só repita com confirmar=true depois
+    que ele aprovar. Mantém preço promocional e preço mínimo/máximo já cadastrados.
+
+    Args:
+        alteracoes: lista de {"sku": "...", "preco": 53.8} (até 20). O preço é o valor final com impostos.
+        confirmar: false = só prévia (nada muda); true = envia as alterações à Amazon.
+        permitir_variacao_grande: libera mudanças acima de 25% em relação ao preço atual.
+        marketplace: ID do marketplace; se omitido, usa o primeiro configurado (Brasil).
+    """
+    seller_id = config().seller_id
+    if not seller_id:
+        return {"erro": "SPAPI_SELLER_ID não configurado.",
+                "dica": "Adicione ao .env a linha SPAPI_SELLER_ID=<seu Token de comerciante> (Seller Central > "
+                        "Configurações > Informações da conta > Informações do vendedor) e reinicie o Claude."}
+    if not alteracoes:
+        raise ValueError("Informe ao menos uma alteração.")
+    if len(alteracoes) > MAX_ALTERACOES:
+        raise ValueError(f"Máximo de {MAX_ALTERACOES} alterações por vez.")
+    pedidos: list[tuple[str, float]] = []
+    for a in alteracoes:
+        sku = str(a.get("sku", "")).strip()
+        try:
+            preco = float(str(a.get("preco")).replace(",", "."))
+        except (TypeError, ValueError):
+            raise ValueError(f"Preço inválido para {sku or a}: {a.get('preco')!r}") from None
+        if not sku or preco <= 0:
+            raise ValueError(f"Alteração inválida: {a}")
+        pedidos.append((sku, preco))
+    if len({s for s, _ in pedidos}) != len(pedidos):
+        raise ValueError("Há SKUs repetidos na lista.")
+
+    mkt = marketplace or config().marketplace_ids[0]
+    resultados: list[dict[str, Any]] = []
+    for sku, novo in pedidos:
+        try:
+            info = await _prepare_change(seller_id, mkt, sku, novo)
+        except SPAPIError as e:
+            erro = _pricing_error(e)
+            if e.status in (401, 403):
+                erro["dica"] = ("Acesso negado. Confira se o papel 'Product Listing' está marcado no aplicativo e se o "
+                                "Refresh Token foi gerado depois disso; confira também o SPAPI_SELLER_ID.")
+            elif e.status == 404:
+                erro["dica"] = "SKU não encontrado nesta conta/marketplace (ou SPAPI_SELLER_ID incorreto)."
+            resultados.append({"sku": sku, "preco_novo": novo, "situacao": "erro", **erro})
+            continue
+
+        bloqueio = None
+        if not info["_product_type"]:
+            bloqueio = "Não foi possível descobrir o tipo de produto do anúncio."
+        elif info["preco_atual"] is None:
+            bloqueio = "Preço atual não encontrado no anúncio; altere este na Seller Central."
+        elif abs(info["variacao_pct"]) > VARIACAO_MAXIMA * 100 and not permitir_variacao_grande:
+            bloqueio = f"Variação de {info['variacao_pct']}% acima do limite de {int(VARIACAO_MAXIMA * 100)}%."
+        elif info["preco_atual"] == info["preco_novo"]:
+            bloqueio = "O preço novo é igual ao atual."
+
+        publico = {k: v for k, v in info.items() if not k.startswith("_")}
+        if bloqueio:
+            resultados.append({**publico, "situacao": "bloqueado", "motivo": bloqueio})
+            continue
+        if not confirmar:
+            resultados.append({**publico, "situacao": "previa"})
+            continue
+
+        patches = listings.price_patch(info["_attributes"], mkt, info["preco_novo"], info["_moeda"])
+        try:
+            resp = await client().patch_listing(seller_id, sku, mkt, info["_product_type"], patches)
+            status = resp.get("status", "?")
+            problemas = listings.issues_text(resp.get("issues"))
+            submission = resp.get("submissionId", "")
+        except SPAPIError as e:
+            status, problemas, submission = f"ERRO {e.status}", [str(e.body)[:300]], ""
+        listings.append_log(config().reports_dir, {
+            "data_hora": listings.now(), "sku": sku, "asin": info["asin"], "marketplace": mkt,
+            "preco_anterior": info["preco_atual"], "preco_novo": info["preco_novo"],
+            "variacao_pct": info["variacao_pct"], "status": status, "submission_id": submission,
+            "problemas": " | ".join(problemas),
+        })
+        resultados.append({**publico, "situacao": "enviado" if status == "ACCEPTED" else "recusado",
+                           "status_amazon": status, **({"problemas": problemas} if problemas else {})})
+
+    resumo: dict[str, int] = {}
+    for r in resultados:
+        resumo[r["situacao"]] = resumo.get(r["situacao"], 0) + 1
+    out: dict[str, Any] = {"marketplace": mkt, "confirmar": confirmar, "resumo": resumo, "itens": resultados}
+    if not confirmar:
+        out["proximo_passo"] = "Nada foi alterado. Mostre a prévia ao usuário e, se ele aprovar, repita com confirmar=true."
+    else:
+        out["observacao"] = ("Alterações aceitas levam de alguns minutos a 1 hora para aparecer no site. "
+                             f"Registro salvo em {listings.LOG_NAME} na pasta de relatórios.")
+    return out
 
 
 # --- arquivos locais -------------------------------------------------------------------------

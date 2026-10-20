@@ -47,6 +47,7 @@ class Config:
     marketplace_ids: tuple[str, ...]
     reports_dir: Path
     sandbox: bool = False
+    seller_id: str | None = None
 
     @property
     def endpoint(self) -> str:
@@ -86,4 +87,5 @@ def load_config() -> Config:
         marketplace_ids=marketplaces,
         reports_dir=Path(os.environ.get("SPAPI_REPORTS_DIR", "./relatorios")).expanduser().resolve(),
         sandbox=os.environ.get("SPAPI_SANDBOX", "false").lower() in ("1", "true", "yes", "sim"),
+        seller_id=os.environ.get("SPAPI_SELLER_ID", "").strip() or None,
     )

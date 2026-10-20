@@ -91,7 +91,7 @@ def load_rows(path: Path, json_path: str | None = None) -> tuple[list[str], list
         else:
             reader = csv.reader(io.StringIO(text))
         header = next(reader, [])
-        header = [h.strip() for h in header]
+        header = [h.strip().lstrip("﻿") for h in header]
         rows = [dict(zip(header, (v.strip() for v in row))) for row in reader if any(v.strip() for v in row)]
         return header, rows
     if fmt == "json":
