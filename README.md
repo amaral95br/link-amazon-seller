@@ -29,6 +29,7 @@ Com ele você pode pedir ao Claude coisas como:
 | `precos_asins` | Preço da Buy Box, nº de ofertas e ranking de vendas de até 200 ASINs, inclusive de concorrentes |
 | `ofertas_asin` | Todas as ofertas de um ASIN: preço, frete, FBA/Prime, quem ganha a Buy Box |
 | `meus_precos` | Preço atual das suas ofertas, por SKU |
+| `solicitar_avaliacoes` | Pede avaliação + feedback (botão "Solicitar uma avaliação") para pedidos elegíveis, sem repetir pedidos; exige o papel **Buyer Solicitation** |
 | `alterar_precos` | Altera o preço de anúncios seus: mostra uma prévia, só aplica com confirmação, bloqueia variações acima de 25% e registra tudo em `alteracoes_preco.csv` |
 
 Qualquer `reportType` válido da SP-API é aceito, mesmo que não esteja no catálogo.

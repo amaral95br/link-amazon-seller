@@ -16,6 +16,8 @@ LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 REPORTS = "/reports/2021-06-30"
 PRICING = "/products/pricing/v0"
 LISTINGS = "/listings/2021-08-01"
+SOLICITATIONS = "/solicitations/v1/orders"
+REVIEW_ACTION = "productReviewAndSellerFeedback"
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
@@ -173,6 +175,19 @@ class SPAPIClient:
         return await self.request("PATCH", f"{LISTINGS}/items/{quote(seller_id, safe='')}/{quote(sku, safe='')}",
                                   params={"marketplaceIds": marketplace_id},
                                   json={"productType": product_type, "patches": patches})
+
+    # --- Solicitations API v1 -----------------------------------------------------------
+
+    async def review_request_allowed(self, order_id: str, marketplace_id: str) -> bool:
+        """True se a Amazon permite pedir avaliação para este pedido agora."""
+        data = await self.request("GET", f"{SOLICITATIONS}/{quote(order_id, safe='')}",
+                                  params={"marketplaceIds": marketplace_id})
+        actions = ((data.get("_links") or {}).get("actions") or [])
+        return any(REVIEW_ACTION in str(a.get("href", "")) or a.get("name") == REVIEW_ACTION for a in actions)
+
+    async def request_review(self, order_id: str, marketplace_id: str) -> None:
+        await self.request("POST", f"{SOLICITATIONS}/{quote(order_id, safe='')}/solicitations/{REVIEW_ACTION}",
+                           params={"marketplaceIds": marketplace_id})
 
     async def wait_for_report(self, report_id: str, timeout: float, interval: float = 15.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout

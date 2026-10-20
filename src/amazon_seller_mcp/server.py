@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -468,6 +469,133 @@ async def alterar_precos(
     else:
         out["observacao"] = ("Alterações aceitas levam de alguns minutos a 1 hora para aparecer no site. "
                              f"Registro salvo em {listings.LOG_NAME} na pasta de relatórios.")
+    return out
+
+
+# --- pedido de avaliação (Solicitations API) -------------------------------------------------------
+
+REVIEW_LOG = "avaliacoes_solicitadas.csv"
+REVIEW_LOG_COLUMNS = ["data_hora", "pedido", "marketplace", "resultado"]
+STATUS_ELEGIVEIS = ("shipped", "shipped - delivered to buyer", "shipped - picked up")
+INTERVALO_SOLICITACOES = 1.1  # a Amazon permite ~1 chamada por segundo
+
+
+def _already_requested(folder) -> set[str]:
+    path = folder / REVIEW_LOG
+    if not path.is_file():
+        return set()
+    _, rows = files.load_rows(path)
+    return {r["pedido"] for r in rows if r.get("resultado") in ("enviado", "ja_solicitado")}
+
+
+def _log_review(folder, pedido: str, mkt: str, resultado: str) -> None:
+    import csv as _csv
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / REVIEW_LOG
+    new = not path.exists()
+    with path.open("a", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=REVIEW_LOG_COLUMNS)
+        if new:
+            w.writeheader()
+        w.writerow({"data_hora": listings.now(), "pedido": pedido, "marketplace": mkt, "resultado": resultado})
+
+
+def _orders_from_report(arquivo: str, dias_min: int, dias_max: int) -> list[str]:
+    from datetime import datetime, timedelta, timezone as tz
+    path = files.resolve_file(config().reports_dir, arquivo)
+    columns, rows = files.load_rows(path)
+    for col in ("amazon-order-id", "purchase-date", "order-status"):
+        if col not in columns:
+            raise ValueError(f"O arquivo {arquivo} não parece um relatório de pedidos (falta a coluna {col}).")
+    agora = datetime.now(tz.utc)
+    inicio, fim = agora - timedelta(days=dias_max), agora - timedelta(days=dias_min)
+    pedidos: list[str] = []
+    for r in rows:
+        if r.get("order-status", "").strip().lower() not in STATUS_ELEGIVEIS:
+            continue
+        try:
+            data = datetime.fromisoformat(r["purchase-date"].replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if inicio <= data <= fim and r["amazon-order-id"] not in pedidos:
+            pedidos.append(r["amazon-order-id"])
+    return pedidos
+
+
+@mcp.tool()
+async def solicitar_avaliacoes(
+    pedidos: list[str] | None = None,
+    arquivo_pedidos: str | None = None,
+    confirmar: bool = False,
+    limite: int = 40,
+    marketplace: str | None = None,
+) -> dict[str, Any]:
+    """Pede avaliação do produto + feedback do vendedor (o botão "Solicitar uma avaliação" da Seller Central).
+
+    A Amazon só aceita pedidos entregues há 5 a 30 dias e uma única solicitação por pedido; a ferramenta
+    consulta a elegibilidade de cada pedido, pula os já solicitados (registro em avaliacoes_solicitadas.csv)
+    e só envia com confirmar=true. Exige o papel Buyer Solicitation.
+
+    Args:
+        pedidos: IDs de pedido (ex.: 702-1234567-1234567). Alternativa: arquivo_pedidos.
+        arquivo_pedidos: relatório de pedidos baixado (GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL);
+            usa os pedidos enviados/entregues com compra entre 4 e 35 dias atrás.
+        confirmar: false = só verifica quantos são elegíveis (nada é enviado); true = envia.
+        limite: máximo de pedidos verificados nesta chamada (até 60; ~1 segundo por pedido).
+        marketplace: ID do marketplace; se omitido, usa o primeiro configurado (Brasil).
+    """
+    if not pedidos and not arquivo_pedidos:
+        raise ValueError("Informe 'pedidos' ou 'arquivo_pedidos'.")
+    lista = [p.strip() for p in (pedidos or []) if p and p.strip()]
+    if arquivo_pedidos:
+        lista += [p for p in _orders_from_report(arquivo_pedidos, 4, 35) if p not in lista]
+    mkt = marketplace or config().marketplace_ids[0]
+    folder = config().reports_dir
+    ja = _already_requested(folder)
+    pendentes = [p for p in lista if p not in ja]
+    limite = max(1, min(limite, 60))
+    lote, restantes = pendentes[:limite], pendentes[limite:]
+
+    contagem = {"enviado": 0, "elegivel": 0, "nao_elegivel": 0, "erro": 0}
+    detalhes: list[dict[str, Any]] = []
+    for i, pedido in enumerate(lote):
+        if i:
+            await asyncio.sleep(INTERVALO_SOLICITACOES)
+        try:
+            permitido = await client().review_request_allowed(pedido, mkt)
+            if not permitido:
+                contagem["nao_elegivel"] += 1
+                continue
+            if not confirmar:
+                contagem["elegivel"] += 1
+                continue
+            await asyncio.sleep(INTERVALO_SOLICITACOES)
+            await client().request_review(pedido, mkt)
+            contagem["enviado"] += 1
+            _log_review(folder, pedido, mkt, "enviado")
+        except SPAPIError as e:
+            if e.status in (401, 403) and i == 0:
+                return {"erro": f"A Amazon respondeu {e.status}", "detalhes": e.body,
+                        "dica": "Acesso negado. Marque o papel 'Buyer Solicitation' no aplicativo, gere um Refresh "
+                                "Token novo e troque no .env."}
+            contagem["erro"] += 1
+            detalhes.append({"pedido": pedido, "erro": f"{e.status}", "detalhes": str(e.body)[:200]})
+
+    out: dict[str, Any] = {
+        "marketplace": mkt,
+        "confirmar": confirmar,
+        "pedidos_encontrados": len(lista),
+        "ja_solicitados_antes": len(lista) - len(pendentes),
+        "verificados_agora": len(lote),
+        "resultado": {k: v for k, v in contagem.items() if v or k in ("enviado", "elegivel")},
+        "faltam_verificar": len(restantes),
+    }
+    if detalhes:
+        out["erros"] = detalhes[:10]
+    if not confirmar:
+        out["proximo_passo"] = "Nada foi enviado. Se o usuário aprovar, repita com confirmar=true."
+    elif restantes:
+        out["proximo_passo"] = "Repita a mesma chamada para processar os pedidos restantes."
     return out
 
 
