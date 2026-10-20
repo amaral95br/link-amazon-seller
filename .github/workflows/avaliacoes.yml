@@ -1,0 +1,88 @@
+# Pede avaliação automaticamente, uma vez por dia, para os pedidos elegíveis.
+#
+# Configuração (Settings → Secrets and variables → Actions):
+#   Secrets:   SPAPI_CLIENT_ID, SPAPI_CLIENT_SECRET, SPAPI_REFRESH_TOKEN
+#   Variables: AVALIACOES_ENVIAR = true  → envia de verdade (sem ela, só simula)
+#              SPAPI_MARKETPLACE_IDS     → opcional (padrão: Brasil)
+#              SPAPI_REGION              → opcional (padrão: na)
+#
+# O repositório é público: os logs mostram só contagens, nunca números de pedido.
+name: Pedir avaliações
+
+on:
+  schedule:
+    - cron: "17 12 * * *"  # todo dia às 12:17 UTC (09:17 em Brasília)
+  workflow_dispatch:
+    inputs:
+      enviar:
+        description: "Enviar de verdade? (false = só simular)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: avaliacoes
+  cancel-in-progress: false
+
+jobs:
+  avaliacoes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      SPAPI_CLIENT_ID: ${{ secrets.SPAPI_CLIENT_ID }}
+      SPAPI_CLIENT_SECRET: ${{ secrets.SPAPI_CLIENT_SECRET }}
+      SPAPI_REFRESH_TOKEN: ${{ secrets.SPAPI_REFRESH_TOKEN }}
+      SPAPI_REGION: ${{ vars.SPAPI_REGION || 'na' }}
+      SPAPI_MARKETPLACE_IDS: ${{ vars.SPAPI_MARKETPLACE_IDS || 'A2Q3Y263D00KWC' }}
+      SPAPI_REPORTS_DIR: ./relatorios
+    steps:
+      - name: Verificar credenciais
+        id: check
+        run: |
+          if [ -z "$SPAPI_CLIENT_ID" ] || [ -z "$SPAPI_CLIENT_SECRET" ] || [ -z "$SPAPI_REFRESH_TOKEN" ]; then
+            echo "Credenciais da SP-API não configuradas nos Secrets do repositório; nada a fazer."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.ok == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.ok == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Instalar
+        if: steps.check.outputs.ok == 'true'
+        run: pip install .
+
+      # Guarda o registro de pedidos já solicitados entre uma execução e outra.
+      - name: Restaurar registro de avaliações
+        if: steps.check.outputs.ok == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: relatorios/avaliacoes_solicitadas.csv
+          key: avaliacoes-${{ github.run_id }}
+          restore-keys: avaliacoes-
+
+      - name: Pedir avaliações
+        if: steps.check.outputs.ok == 'true'
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENVIAR="${{ inputs.enviar }}"
+          else
+            ENVIAR="${{ vars.AVALIACOES_ENVIAR }}"
+          fi
+          if [ "$ENVIAR" = "true" ]; then
+            amazon-seller-avaliacoes --enviar
+          else
+            amazon-seller-avaliacoes
+          fi
+
+      - name: Salvar registro de avaliações
+        if: always() && steps.check.outputs.ok == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: relatorios/avaliacoes_solicitadas.csv
+          key: avaliacoes-${{ github.run_id }}

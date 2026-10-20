@@ -115,6 +115,60 @@ Dentro da pasta do projeto:
 claude mcp add amazon-seller -- .venv/bin/amazon-seller-mcp
 ```
 
+## 4. Pedir avaliações automaticamente (opcional)
+
+O comando `amazon-seller-avaliacoes` faz sozinho, sem o Claude, o mesmo que o botão
+"Solicitar uma avaliação": gera o relatório de pedidos das compras feitas entre 4 e 34 dias atrás,
+pergunta à Amazon quais pedidos estão elegíveis (entregues há 5 a 30 dias e ainda não solicitados)
+e envia o pedido de avaliação + feedback. Os pedidos enviados ficam em
+`relatorios/avaliacoes_solicitadas.csv` e nunca são repetidos.
+
+Exige o papel **Buyer Solicitation** no app da SP-API. Se você adicionar o papel agora, gere um
+Refresh Token novo.
+
+```bash
+amazon-seller-avaliacoes            # simulação: só mostra quantos estão elegíveis
+amazon-seller-avaliacoes --enviar   # envia de verdade
+```
+
+Outras opções: `--limite N` (verifica no máximo N pedidos por execução), `--dias-min`/`--dias-max`,
+`--marketplace` e `--detalhes`. A Amazon permite cerca de 1 chamada por segundo, então cada pedido
+leva uns 2 segundos.
+
+Rode **uma vez por dia**, de uma das formas abaixo.
+
+### Opção A: GitHub Actions (na nuvem, sem deixar o computador ligado)
+
+O workflow `.github/workflows/avaliacoes.yml` já está pronto e roda todo dia às 09:17 (horário de Brasília).
+
+1. No GitHub, abra o repositório e vá em **Settings → Secrets and variables → Actions**.
+2. Na aba **Secrets**, crie `SPAPI_CLIENT_ID`, `SPAPI_CLIENT_SECRET` e `SPAPI_REFRESH_TOKEN`.
+   Os Secrets ficam criptografados e não aparecem nos logs.
+3. Teste em **Actions → Pedir avaliações → Run workflow**, deixando "Enviar de verdade" desmarcado.
+   O log mostra quantos pedidos estão elegíveis.
+4. Para ligar o envio automático, crie na aba **Variables** a variável `AVALIACOES_ENVIAR` com o valor `true`.
+   Sem ela, a execução diária só simula.
+
+Os logs mostram apenas contagens, nunca números de pedido, porque o repositório é público.
+
+### Opção B: no seu computador
+
+**Mac/Linux (cron)**: rode `crontab -e` e adicione, ajustando o caminho:
+
+```
+17 9 * * * cd /caminho/para/link-amazon-seller && .venv/bin/amazon-seller-avaliacoes --enviar >> relatorios/avaliacoes.log 2>&1
+```
+
+**Windows (Agendador de Tarefas)**: crie uma tarefa básica diária com:
+- Programa: `C:\caminho\para\link-amazon-seller\.venv\Scripts\amazon-seller-avaliacoes.exe`
+- Argumentos: `--enviar`
+- Iniciar em: `C:\caminho\para\link-amazon-seller`
+
+O computador precisa estar ligado no horário agendado.
+
+> Use só uma das opções. Se usar as duas, cada uma tem seu próprio registro. A Amazon recusa um
+> segundo pedido para o mesmo pedido, então não há envio duplicado, mas são chamadas desperdiçadas.
+
 ## Dicas de uso
 
 - **Relatórios de liquidação** (repasses, taxas e reembolsos) são gerados pela própria Amazon a cada

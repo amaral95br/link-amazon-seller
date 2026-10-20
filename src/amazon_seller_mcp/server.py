@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from . import files, listings, pricing
+from . import files, listings, pricing, reviews
 from .catalog import BY_CODE, CATEGORIES, REPORT_TYPES
 from .client import SPAPIClient, SPAPIError
 from .config import MARKETPLACES, Config, load_config
@@ -474,52 +473,13 @@ async def alterar_precos(
 
 # --- pedido de avaliação (Solicitations API) -------------------------------------------------------
 
-REVIEW_LOG = "avaliacoes_solicitadas.csv"
-REVIEW_LOG_COLUMNS = ["data_hora", "pedido", "marketplace", "resultado"]
-STATUS_ELEGIVEIS = ("shipped", "shipped - delivered to buyer", "shipped - picked up")
-INTERVALO_SOLICITACOES = 1.1  # a Amazon permite ~1 chamada por segundo
-
-
-def _already_requested(folder) -> set[str]:
-    path = folder / REVIEW_LOG
-    if not path.is_file():
-        return set()
-    _, rows = files.load_rows(path)
-    return {r["pedido"] for r in rows if r.get("resultado") in ("enviado", "ja_solicitado")}
-
-
-def _log_review(folder, pedido: str, mkt: str, resultado: str) -> None:
-    import csv as _csv
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / REVIEW_LOG
-    new = not path.exists()
-    with path.open("a", newline="", encoding="utf-8") as f:
-        w = _csv.DictWriter(f, fieldnames=REVIEW_LOG_COLUMNS)
-        if new:
-            w.writeheader()
-        w.writerow({"data_hora": listings.now(), "pedido": pedido, "marketplace": mkt, "resultado": resultado})
+REVIEW_LOG = reviews.REVIEW_LOG
 
 
 def _orders_from_report(arquivo: str, dias_min: int, dias_max: int) -> list[str]:
-    from datetime import datetime, timedelta, timezone as tz
     path = files.resolve_file(config().reports_dir, arquivo)
     columns, rows = files.load_rows(path)
-    for col in ("amazon-order-id", "purchase-date", "order-status"):
-        if col not in columns:
-            raise ValueError(f"O arquivo {arquivo} não parece um relatório de pedidos (falta a coluna {col}).")
-    agora = datetime.now(tz.utc)
-    inicio, fim = agora - timedelta(days=dias_max), agora - timedelta(days=dias_min)
-    pedidos: list[str] = []
-    for r in rows:
-        if r.get("order-status", "").strip().lower() not in STATUS_ELEGIVEIS:
-            continue
-        try:
-            data = datetime.fromisoformat(r["purchase-date"].replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if inicio <= data <= fim and r["amazon-order-id"] not in pedidos:
-            pedidos.append(r["amazon-order-id"])
-    return pedidos
+    return reviews.orders_from_rows(columns, rows, dias_min, dias_max, f"arquivo {arquivo}")
 
 
 @mcp.tool()
@@ -551,35 +511,14 @@ async def solicitar_avaliacoes(
         lista += [p for p in _orders_from_report(arquivo_pedidos, 4, 35) if p not in lista]
     mkt = marketplace or config().marketplace_ids[0]
     folder = config().reports_dir
-    ja = _already_requested(folder)
+    ja = reviews.already_requested(folder)
     pendentes = [p for p in lista if p not in ja]
     limite = max(1, min(limite, 60))
     lote, restantes = pendentes[:limite], pendentes[limite:]
 
-    contagem = {"enviado": 0, "elegivel": 0, "nao_elegivel": 0, "erro": 0}
-    detalhes: list[dict[str, Any]] = []
-    for i, pedido in enumerate(lote):
-        if i:
-            await asyncio.sleep(INTERVALO_SOLICITACOES)
-        try:
-            permitido = await client().review_request_allowed(pedido, mkt)
-            if not permitido:
-                contagem["nao_elegivel"] += 1
-                continue
-            if not confirmar:
-                contagem["elegivel"] += 1
-                continue
-            await asyncio.sleep(INTERVALO_SOLICITACOES)
-            await client().request_review(pedido, mkt)
-            contagem["enviado"] += 1
-            _log_review(folder, pedido, mkt, "enviado")
-        except SPAPIError as e:
-            if e.status in (401, 403) and i == 0:
-                return {"erro": f"A Amazon respondeu {e.status}", "detalhes": e.body,
-                        "dica": "Acesso negado. Marque o papel 'Buyer Solicitation' no aplicativo, gere um Refresh "
-                                "Token novo e troque no .env."}
-            contagem["erro"] += 1
-            detalhes.append({"pedido": pedido, "erro": f"{e.status}", "detalhes": str(e.body)[:200]})
+    contagem, detalhes, negado = await reviews.check_and_send(client(), lote, mkt, folder, confirmar)
+    if negado:
+        return {"erro": f"A Amazon respondeu {negado.status}", "detalhes": negado.body, "dica": reviews.DICA_PERMISSAO}
 
     out: dict[str, Any] = {
         "marketplace": mkt,

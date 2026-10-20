@@ -193,7 +193,7 @@ class SPAPIClient:
         deadline = time.monotonic() + timeout
         while True:
             report = await self.get_report(report_id)
-            if report.get("processingStatus") in ("DONE", "CANCELLED", "FATAL"):
+            if report.get("processingStatus") in ("DONE", "DONE_NO_DATA", "CANCELLED", "FATAL"):
                 return report
             if time.monotonic() + interval > deadline:
                 return report
